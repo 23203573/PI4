@@ -21,6 +21,16 @@ python scripts\resumir_clima_ciclo_milho.py
 python scripts\avaliar_estimativa_milho.py
 ```
 
-Na barra lateral do dashboard, use **Baixar relatório desta página (PDF)** para exportar a página aberta com os filtros selecionados, gráficos e tabelas correspondentes aos dados exibidos. Os gráficos são desenhados em vetor no PDF. O relatório identifica o período, as safras e, quando aplicável, o estado, o indicador climático e a seleção da avaliação.
+Na página **Mapa interativo por UF**, é possível explorar produção, área plantada,
+rendimento, indicadores climáticos e cobertura de dados por estado. O mapa permite
+comparar o valor do ano selecionado com o ano anterior ou com a média dos anos
+anteriores do período filtrado. Os limites estaduais estão em
+`assets/brazil-states.geojson`, com atribuição e licença em `assets/ATTRIBUTION.txt`.
+
+Na barra lateral, **Baixar tabelas CSV (ZIP)** exporta cada tabela filtrada em um
+arquivo CSV separado, junto com um arquivo de texto que registra os filtros aplicados.
+A exportação acompanha a página e os filtros selecionados. **Baixar relatório desta
+página (PDF)** exporta a página aberta com os gráficos e tabelas; os gráficos são
+desenhados em vetor.
 
 As observações brutas baixadas do INMET ficam em `data/raw/inmet/dadoshistoricos`. O painel apresenta 2025 como preliminar e identifica cobertura incompleta de clima. As janelas agronômicas são estimativas exploratórias por macrorregião. A comparação do modelo é retrospectiva: usa clima observado durante o ciclo e área plantada daquele ano, não uma previsão disponível antes da colheita.
