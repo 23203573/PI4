@@ -23,8 +23,12 @@ python scripts\avaliar_estimativa_milho.py
 
 Na página **Mapa interativo por UF**, é possível explorar produção, área plantada,
 rendimento, indicadores climáticos e cobertura de dados por estado. O mapa permite
-comparar o valor do ano selecionado com o ano anterior ou com a média dos anos
-anteriores do período filtrado. Os limites estaduais estão em
+comparar as médias do período e safras selecionados com o período imediatamente
+anterior de mesma duração ou com a média histórica anterior. Os filtros globais de
+período e safra são aplicados diretamente ao mapa. Produção e área representam
+médias anuais dos totais das safras selecionadas; o rendimento anual é calculado
+pela razão entre produção e área plantada; indicadores climáticos e cobertura são
+agregados com ponderação pela área plantada. Os limites estaduais estão em
 `assets/brazil-states.geojson`, com atribuição e licença em `assets/ATTRIBUTION.txt`.
 
 Na barra lateral, **Baixar tabelas CSV (ZIP)** exporta cada tabela filtrada em um

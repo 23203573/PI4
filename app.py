@@ -102,9 +102,9 @@ MAP_AGRICULTURE_METRICS = {
 }
 MAP_COVERAGE_METRIC = "Cobertura climática (%)"
 MAP_REFERENCE_MODES = {
-    "Valor do ano selecionado": "current",
-    "Variação em relação ao ano anterior (%)": "previous",
-    "Variação em relação à média dos anos anteriores (%)": "historical",
+    "Média do período selecionado": "current",
+    "Variação em relação ao período anterior de igual duração (%)": "previous",
+    "Variação em relação à média histórica anterior (%)": "historical",
 }
 MAP_GEOJSON_PATH = ROOT / "assets" / "brazil-states.geojson"
 METRIC_NAMES = {
@@ -995,19 +995,6 @@ def build_page_report(
             sections.append(("Gráfico: chuva mensal", monthly_chart))
         title = f"Clima e produção — {UF_NAMES.get(selected_state, selected_state)}"
     elif page == "Mapa interativo por UF":
-        available_years = sorted(
-            year
-            for year in data["agriculture"]["ano"].dropna().astype(int).unique()
-            if years[0] <= year <= years[1]
-        )
-        selected_year = int(
-            st.session_state.get(
-                "map_year", available_years[-1] if available_years else years[1]
-            )
-        )
-        selected_season = st.session_state.get(
-            "map_season", seasons[0] if seasons else "1a"
-        )
         selected_metric = st.session_state.get(
             "map_metric", next(iter(MAP_AGRICULTURE_METRICS))
         )
@@ -1015,22 +1002,23 @@ def build_page_report(
             "map_coverage_indicator", next(iter(CLIMATE_COMPARISONS))
         )
         selected_reference = st.session_state.get(
-            "map_reference_mode", "Valor do ano selecionado"
+            "map_reference_mode", "Média do período selecionado"
         )
+        if selected_reference not in MAP_REFERENCE_MODES:
+            selected_reference = "Média do período selecionado"
         reference_mode = MAP_REFERENCE_MODES[selected_reference]
         map_frame = build_state_map_data(
             data,
-            selected_year,
-            selected_season,
+            years,
+            seasons,
             selected_metric,
             selected_coverage,
             reference_mode,
-            years[0],
         )
         filters.extend(
             [
-                f"Ano: {selected_year}",
-                f"Safra: {SEASON_NAMES[selected_season]}",
+                f"Período: {years[0]}–{years[1]}",
+                f"Safras: {', '.join(SEASON_NAMES[season] for season in seasons)}",
                 f"Indicador: {selected_metric}",
                 f"Visualização: {selected_reference}",
                 f"Indicador de cobertura: {selected_coverage}",
@@ -1049,8 +1037,8 @@ def build_page_report(
                     map_frame,
                     selected_metric,
                     reference_mode,
-                    selected_year,
-                    selected_season,
+                    years,
+                    seasons,
                 ),
             )
         )
@@ -1265,12 +1253,11 @@ def load_state_geojson() -> dict:
 
 def build_state_map_data(
     data: dict[str, pd.DataFrame],
-    selected_year: int,
-    selected_season: str,
+    years: tuple[int, int],
+    seasons: list[str],
     metric_name: str,
     coverage_name: str,
     reference_mode: str,
-    period_start: int,
 ) -> pd.DataFrame:
     is_coverage = metric_name == MAP_COVERAGE_METRIC
     is_climate = metric_name in CLIMATE_COMPARISONS
@@ -1288,74 +1275,125 @@ def build_state_map_data(
         if is_coverage or not is_climate
         else CLIMATE_COMPARISONS[metric_name][1]
     )
+    period_length = years[1] - years[0] + 1
 
-    selected_rows = source.loc[
-        source["ano"].eq(selected_year) & source["safra"].eq(selected_season)
-    ]
-    current = selected_rows[["uf", metric_column]].rename(
-        columns={metric_column: "valor"}
+    def period_values(
+        period: tuple[int, int],
+        column: str,
+        period_source: pd.DataFrame | None = None,
+        *,
+        climate_values: bool | None = None,
+    ) -> pd.DataFrame:
+        rows_source = source if period_source is None else period_source
+        is_agriculture = (
+            source_name == "agriculture"
+            if climate_values is None
+            else not climate_values
+        )
+        rows = rows_source.loc[
+            rows_source["ano"].between(period[0], period[1])
+            & rows_source["safra"].isin(seasons)
+        ].copy()
+        if rows.empty:
+            return pd.DataFrame(columns=["uf", "valor"])
+        if is_agriculture:
+            annual = rows.groupby(["uf", "ano"], as_index=False).agg(
+                area_plantada_ha=("area_plantada_ha", lambda values: values.sum(min_count=1)),
+                producao_t=("producao_t", lambda values: values.sum(min_count=1)),
+            )
+            if column == "rendimento_kg_ha":
+                annual["valor"] = (
+                    annual["producao_t"] * 1000
+                    / annual["area_plantada_ha"].where(
+                        annual["area_plantada_ha"].gt(0)
+                    )
+                )
+            else:
+                annual["valor"] = annual[column]
+            return annual.groupby("uf", as_index=False)["valor"].mean()
+
+        values = pd.to_numeric(rows[column], errors="coerce")
+        weights = pd.to_numeric(
+            rows["area_plantada_ha"], errors="coerce"
+        ).where(lambda weight: weight.gt(0) & values.notna())
+        weighted_values = rows.assign(
+            _valor=values,
+            _peso=weights,
+            _valor_ponderado=values * weights,
+        )
+        return (
+            weighted_values.groupby("uf", as_index=False)
+            .agg(
+                _total_ponderado=("_valor_ponderado", "sum"),
+                _total_peso=("_peso", "sum"),
+                _media=("_valor", "mean"),
+            )
+            .assign(
+                valor=lambda group: group["_total_ponderado"].div(
+                    group["_total_peso"].where(group["_total_peso"].gt(0))
+                ).fillna(group["_media"])
+            )[["uf", "valor"]]
+        )
+
+    current = period_values(years, metric_column)
+    coverage = period_values(
+        years,
+        coverage_column,
+        data["cycle"],
+        climate_values=True,
+    ).rename(
+        columns={"valor": "cobertura_climatica_pct"}
     )
-    if coverage_column in selected_rows:
-        current = current.merge(
-            selected_rows[["uf", coverage_column]].rename(
-                columns={coverage_column: "cobertura_climatica_pct"}
-            ),
-            on="uf",
-            how="left",
-        )
-    if "dados_agricolas_preliminares" in selected_rows:
-        current = current.merge(
-            selected_rows[["uf", "dados_agricolas_preliminares"]],
-            on="uf",
-            how="left",
-        )
-    elif "dados_preliminares" in selected_rows:
-        current = current.merge(
-            selected_rows[["uf", "dados_preliminares"]].rename(
-                columns={"dados_preliminares": "dados_agricolas_preliminares"}
-            ),
-            on="uf",
-            how="left",
-        )
-
-    result = current.copy()
-    reference_label = ""
+    result = current.merge(coverage, on="uf", how="left")
+    reference_label = "média do período selecionado"
     if reference_mode == "previous":
-        reference_year = selected_year - 1
-        reference_rows = source.loc[
-            source["ano"].eq(reference_year) & source["safra"].eq(selected_season),
-            ["uf", metric_column],
-        ]
+        reference_period = (years[0] - period_length, years[0] - 1)
+        reference_label = (
+            f"período anterior ({reference_period[0]}–{reference_period[1]})"
+        )
+        reference = period_values(reference_period, metric_column)
         result = result.merge(
-            reference_rows.rename(columns={metric_column: "valor_referencia"}),
+            reference.rename(columns={"valor": "valor_referencia"}),
             on="uf",
             how="left",
         )
-        reference_label = f"ano anterior ({reference_year})"
     elif reference_mode == "historical":
-        historic_rows = source.loc[
-            source["ano"].between(period_start, selected_year - 1)
-            & source["safra"].eq(selected_season),
-            ["uf", metric_column],
-        ]
-        historical_mean = historic_rows.groupby("uf")[metric_column].mean()
-        result["valor_referencia"] = result["uf"].map(historical_mean)
-        reference_label = (
-            f"média de {period_start} a {selected_year - 1}"
-            if selected_year > period_start
-            else "média dos anos anteriores"
+        available_years = source.loc[source["safra"].isin(seasons), "ano"].dropna()
+        if available_years.empty or years[0] <= int(available_years.min()):
+            reference = pd.DataFrame(columns=["uf", "valor"])
+            reference_label = "sem anos anteriores disponíveis"
+        else:
+            reference_period = (int(available_years.min()), years[0] - 1)
+            reference_label = (
+                f"média histórica ({reference_period[0]}–{reference_period[1]})"
+            )
+            reference = period_values(reference_period, metric_column)
+        result = result.merge(
+            reference.rename(columns={"valor": "valor_referencia"}),
+            on="uf",
+            how="left",
         )
-    if "cobertura_climatica_pct" not in result:
-        coverage_rows = data["cycle"].loc[
-            data["cycle"]["ano"].eq(selected_year)
-            & data["cycle"]["safra"].eq(selected_season),
-            ["uf", coverage_column],
-        ].rename(columns={coverage_column: "cobertura_climatica_pct"})
-        result = result.merge(coverage_rows, on="uf", how="left")
-    if "dados_agricolas_preliminares" not in result:
-        result["dados_agricolas_preliminares"] = "não"
-    if "valor_referencia" not in result:
+    else:
         result["valor_referencia"] = float("nan")
+
+    preliminary_column = (
+        "dados_agricolas_preliminares"
+        if "dados_agricolas_preliminares" in data["agriculture"]
+        else "dados_preliminares"
+    )
+    preliminary_rows = data["agriculture"].loc[
+        data["agriculture"]["ano"].between(years[0], years[1])
+        & data["agriculture"]["safra"].isin(seasons)
+    ]
+    preliminary = (
+        preliminary_rows.groupby("uf")[preliminary_column]
+        .apply(lambda values: "sim" if values.eq("sim").any() else "não")
+        .rename("dados_agricolas_preliminares")
+    )
+    result = result.merge(preliminary, on="uf", how="left")
+    result["dados_agricolas_preliminares"] = result[
+        "dados_agricolas_preliminares"
+    ].fillna("não")
 
     result["variacao_pct"] = (
         (result["valor"] - result["valor_referencia"])
@@ -1366,10 +1404,10 @@ def build_state_map_data(
         result["valor"] if reference_mode == "current" else result["variacao_pct"]
     )
     result["estado"] = result["uf"].map(UF_NAMES)
-    result["ano"] = selected_year
-    result["safra"] = selected_season
+    result["periodo"] = f"{years[0]}–{years[1]}"
+    result["safras"] = ", ".join(SEASON_NAMES[season] for season in seasons)
     result["valor_nome"] = metric_name
-    result["referencia_nome"] = reference_label or "—"
+    result["referencia_nome"] = reference_label
     return result
 
 
@@ -1377,20 +1415,28 @@ def build_state_choropleth(
     frame: pd.DataFrame,
     metric_name: str,
     reference_mode: str,
-    selected_year: int,
-    selected_season: str,
+    years: tuple[int, int],
+    seasons: list[str],
 ) -> go.Figure:
     geojson = load_state_geojson()
     if reference_mode == "current":
         color_title = metric_name
-        title = f"{metric_name} por UF · {selected_year}"
+        title = (
+            f"{metric_name} por UF · média de {years[0]}–{years[1]} · "
+            f"{', '.join(SEASON_NAMES[season] for season in seasons)}"
+        )
         color_scale = "Viridis"
     else:
         color_title = "Variação (%)"
-        title = f"Variação de {metric_name.lower()} · {selected_season} · {selected_year}"
+        title = (
+            f"Variação de {metric_name.lower()} · período {years[0]}–{years[1]} · "
+            f"{', '.join(SEASON_NAMES[season] for season in seasons)}"
+        )
         color_scale = "RdBu"
     hover_data = {
         "uf": True,
+        "periodo": True,
+        "safras": True,
         "valor": ":,.2f",
         "valor_referencia": ":,.2f",
         "variacao_pct": ":+.1f",
@@ -1413,8 +1459,8 @@ def build_state_choropleth(
         hover_data=hover_data,
         labels={
             "uf": "UF",
-            "ano": "Ano",
-            "safra": "Safra",
+            "periodo": "Período",
+            "safras": "Safras",
             "valor": metric_name,
             "valor_referencia": "Valor de referência",
             "variacao_pct": "Variação (%)",
@@ -1422,7 +1468,6 @@ def build_state_choropleth(
             "cobertura_climatica_pct": "Cobertura climática (%)",
             "dados_agricolas_preliminares": "Dados agrícolas preliminares",
             "valor_mapa": color_title,
-            "referencia_nome": "Referência",
         },
         title=title,
     )
@@ -1450,9 +1495,12 @@ def map_report_table(frame: pd.DataFrame, metric_name: str) -> pd.DataFrame:
     columns = {
         "estado": "Estado",
         "uf": "UF",
+        "periodo": "Período",
+        "safras": "Safras",
         "valor": metric_name,
         "valor_referencia": "Valor de referência",
         "variacao_pct": "Variação (%)",
+        "referencia_nome": "Referência",
         "cobertura_climatica_pct": "Cobertura climática (%)",
         "dados_agricolas_preliminares": "Dados agrícolas preliminares",
     }
@@ -1465,28 +1513,8 @@ def interactive_map_page(
 ) -> None:
     page_header(
         "Mapa interativo por Unidade da Federação",
-        "Explore a produção e o clima do milho por UF, compare anos e consulte a cobertura dos dados.",
-    )
-    map_years = sorted(
-        year
-        for year in data["agriculture"]["ano"].dropna().astype(int).unique()
-        if years[0] <= year <= years[1]
-    )
-    if not map_years:
-        st.info("Não há anos disponíveis para os filtros selecionados.")
-        return
-    col_year, col_season = st.columns(2)
-    selected_year = col_year.selectbox(
-        "Ano",
-        map_years,
-        index=len(map_years) - 1,
-        key="map_year",
-    )
-    selected_season = col_season.selectbox(
-        "Safra",
-        seasons,
-        format_func=lambda season: SEASON_NAMES[season],
-        key="map_season",
+        "O mapa respeita o período e as safras selecionados na barra lateral. "
+        "Os indicadores agrícolas são médias anuais; os climáticos são médias dos ciclos ponderadas pela área plantada.",
     )
     metric_options = [
         *MAP_AGRICULTURE_METRICS,
@@ -1511,12 +1539,11 @@ def interactive_map_page(
     reference_mode = MAP_REFERENCE_MODES[reference_name]
     frame = build_state_map_data(
         data,
-        selected_year,
-        selected_season,
+        years,
+        seasons,
         metric_name,
         coverage_name,
         reference_mode,
-        years[0],
     )
     if frame.empty:
         st.info("Não há registros para a UF, ano e safra selecionados.")
@@ -1544,18 +1571,18 @@ def interactive_map_page(
         )
 
     figure = build_state_choropleth(
-        frame, metric_name, reference_mode, selected_year, selected_season
+        frame, metric_name, reference_mode, years, seasons
     )
     st.plotly_chart(figure, use_container_width=True)
     if reference_mode != "current" and frame["valor_referencia"].notna().sum() == 0:
         st.warning(
-            "Não há valores de referência no período para comparar. Amplie o período "
-            "selecionado ou escolha um ano posterior."
+            "Não há valores de referência anteriores disponíveis para este recorte. "
+            "Amplie o período ou escolha uma comparação com anos históricos disponíveis."
         )
-    if selected_year == 2025 and (
+    if years[1] >= 2025 and (
         frame.get("dados_agricolas_preliminares", pd.Series(dtype=str)) == "sim"
     ).any():
-        st.warning("Os dados agrícolas de 2025 são preliminares.")
+        st.warning("O período selecionado inclui dados agrícolas preliminares de 2025.")
     if metric_name == "Chuva acumulada no ciclo (mm)":
         st.info(
             "A chuva acumulada só é apresentada quando o ciclo tem cobertura suficiente; "
@@ -1567,10 +1594,11 @@ def interactive_map_page(
     st.dataframe(report_table, use_container_width=True, hide_index=True)
     with st.expander("Como interpretar o mapa"):
         st.write(
-            "Passe o cursor sobre uma UF para consultar o valor observado, a referência "
-            "e a variação percentual quando houver comparação. Áreas sem cor não têm "
-            "valor disponível para o indicador e recorte escolhidos. A camada geográfica "
-            "representa os limites estaduais; os dados agrícolas são agregados por UF."
+            "Passe o cursor sobre uma UF para consultar o valor médio, a referência "
+            "e a variação percentual quando houver comparação. Produção e área correspondem "
+            "à média anual dos totais das safras selecionadas; rendimento é ponderado pela "
+            "área. Os indicadores climáticos são médias dos ciclos ponderadas pela área "
+            "plantada. Áreas sem cor não têm valor para o recorte escolhido."
         )
 
 
